@@ -9,7 +9,7 @@ Scarf is a native macOS app built with Xcode. For contributor builds, use the lo
 Requirements:
 
 - macOS 15 (Sequoia) or newer at runtime — that's the app's `MACOSX_DEPLOYMENT_TARGET`. Do not raise this without an explicit decision to drop Sequoia users
-- Xcode 16.0 or newer, selected by `xcode-select` (needed for Swift 6 strict-concurrency features the project uses)
+- Xcode 26.0 or newer, selected by `xcode-select` (the Marker 0.9.0 package requires Swift tools 6.2; earlier Xcode toolchains cannot resolve the package graph)
 - Metal toolchain installed
 - Hermes installed at `~/.hermes/` (see the project README for setup)
 
