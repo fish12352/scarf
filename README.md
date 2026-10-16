@@ -130,7 +130,7 @@ Scarf is a multi-window app — each window binds to one Hermes server. Your loc
 
 ## Requirements & compatibility
 
-- **macOS 15+** (Scarf) · **iOS 18.6+** (ScarfGo) · Xcode 16+ to build from source.
+- **macOS 15+** (Scarf) · **iOS 18.6+** (ScarfGo) · **Xcode 26+** to build from source (Marker 0.9.0 requires Swift tools 6.2).
 - **[Hermes](https://github.com/NousResearch/hermes-agent) v0.6.0+** on each host. Current target: **v0.21.5** (v2026.9.24) — every newer surface is capability-gated or schema-detected, so older hosts keep working with newer-only UI hidden.
 
 | Hermes | Status |
