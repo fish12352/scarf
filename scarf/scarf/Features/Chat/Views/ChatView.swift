@@ -45,7 +45,7 @@ struct ChatView: View {
         let _: Void = ScarfMon.event(.chatRender, "mac.ChatView.body")
         @Bindable var vm = viewModel
         @Bindable var coord = coordinator
-        VStack(spacing: 0) {
+        return VStack(spacing: 0) {
             toolbar
             Divider()
             errorBanner
