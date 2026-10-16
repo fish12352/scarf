@@ -3994,8 +3994,7 @@ final class ChatViewModel {
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 
         func processTerminated(source: TerminalView, exitCode: Int32?) {
-            let terminal = source.getTerminal()
-            terminal.feed(text: "\r\n[Process exited with code \(exitCode ?? -1). Use the toolbar to start or resume a session.]\r\n")
+            source.feed(text: "\r\n[Process exited with code \(exitCode ?? -1). Use the toolbar to start or resume a session.]\r\n")
             DispatchQueue.main.async { self.onTerminated() }
         }
     }
