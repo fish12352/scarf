@@ -45,6 +45,16 @@ jobs:
             -project scarf/scarf.xcodeproj \
             -scheme scarf
 
+      - name: Set up Python for YAML round-trip tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML test dependency
+        run: |
+          python3 -m pip install --disable-pip-version-check PyYAML
+          python3 -c "import yaml; print('PyYAML ' + yaml.__version__)"
+
       - name: Test ScarfCore Swift package
         run: swift test --package-path scarf/Packages/ScarfCore
 
