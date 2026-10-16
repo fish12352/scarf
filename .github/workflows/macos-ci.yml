@@ -114,6 +114,29 @@ jobs:
             "$TEST_FILTER" \
             test
 
+      - name: Package macOS app
+        if: success()
+        run: |
+          APP_DIR="$RUNNER_TEMP/ScarfDerivedData/Build/Products/Debug"
+          APP_PATH="$(find "$APP_DIR" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [[ -z "$APP_PATH" ]]; then
+            echo "No .app bundle found in $APP_DIR" >&2
+            find "$APP_DIR" -maxdepth 2 -print || true
+            exit 1
+          fi
+          ZIP_PATH="$RUNNER_TEMP/Scarf-macOS-${GITHUB_SHA:0:7}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
+          shasum -a 256 "$ZIP_PATH"
+
+      - name: Upload macOS app artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scarf-macos-debug-app
+          path: ${{ runner.temp }}/Scarf-macOS-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload XCTest result bundle on failure
         if: failure()
         uses: actions/upload-artifact@v4
