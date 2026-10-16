@@ -79,6 +79,7 @@ jobs:
           xcodebuild \
             -project scarf/scarf.xcodeproj \
             -scheme scarf \
+            -skipPackagePluginValidation \
             -configuration Debug \
             -destination 'platform=macOS' \
             -derivedDataPath "$RUNNER_TEMP/ScarfDerivedData" \
@@ -102,6 +103,7 @@ jobs:
             -project scarf/scarf.xcodeproj \
             -scheme scarf \
             -testPlan Full \
+            -skipPackagePluginValidation \
             -configuration Debug \
             -destination 'platform=macOS' \
             -derivedDataPath "$RUNNER_TEMP/ScarfDerivedData" \
