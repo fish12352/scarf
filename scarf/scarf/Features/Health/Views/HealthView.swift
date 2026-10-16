@@ -457,19 +457,27 @@ struct HealthView: View {
             }
             .padding(.horizontal, ScarfSpace.s6)
             .padding(.vertical, ScarfSpace.s3)
-            // C1 + C5: `hermes dashboard` does not exist below v0.9.0.
-            // The capability gate keeps the row hidden on those hosts; remote
-            // servers use a loopback-only SSH tunnel rather than a LAN bind.
-            if capabilitiesStore?.capabilities.hasDashboardCommand == true {
+            // C1 + C5: `hermes dashboard` does not exist below v0.9.0 — the
+            // string `dashboard` occurs nowhere in `hermes_cli/main.py` at
+            // `v2026.4.8` (0.8.0), and `def cmd_dashboard(args)` first
+            // appears at `:4458` of `v2026.4.13` (0.9.0), registered at
+            // `:4180` / `:5978`. On 0.6.0-0.8.x this row spawned a verb
+            // argparse does not know, which Hermes routes to the AGENT, so
+            // "Start" looked like it worked and nothing ever bound the port.
+            // Hosts at 0.9.0 and later render byte-identically to the
+            // previous release; the only range that changes is the one where
+            // the control could never have worked.
+            if !viewModel.context.isRemote,
+               capabilitiesStore?.capabilities.hasDashboardCommand == true {
                 Divider()
                 webDashboardRow
             }
         }
     }
 
-    /// Status + controls for `hermes dashboard`. Remote contexts display
-    /// the local loopback port forwarded over SSH; Hermes itself stays bound
-    /// to 127.0.0.1 on the target host.
+    /// Status + controls for `hermes dashboard` (the web UI introduced in
+    /// v0.10.x). Hidden for remote contexts — the dashboard binds 127.0.0.1
+    /// and remote tunneling is deferred.
     private var webDashboardRow: some View {
         HStack(spacing: ScarfSpace.s4) {
             HStack(spacing: 6) {
@@ -477,13 +485,11 @@ struct HealthView: View {
                     .foregroundStyle(viewModel.dashboardStatus.running ? ScarfColor.success : ScarfColor.foregroundMuted)
                     .font(.system(size: 12))
                 if viewModel.dashboardStatus.running {
-                    Text(viewModel.context.isRemote
-                        ? "Remote Web Dashboard via :\(viewModel.dashboardStatus.port)"
-                        : "Web Dashboard on :\(viewModel.dashboardStatus.port)")
+                    Text("Web Dashboard on :\(viewModel.dashboardStatus.port)")
                         .scarfStyle(.captionStrong)
                         .foregroundStyle(ScarfColor.foregroundPrimary)
                 } else {
-                    Text(viewModel.context.isRemote ? "Remote Web Dashboard" : "Web Dashboard")
+                    Text("Web Dashboard")
                         .scarfStyle(.captionStrong)
                         .foregroundStyle(ScarfColor.foregroundPrimary)
                     Text("not running")
@@ -500,9 +506,7 @@ struct HealthView: View {
                         .buttonStyle(ScarfGhostButton())
                         .disabled(viewModel.dashboardStatus.busy)
                 } else {
-                    Button(viewModel.context.isRemote ? "Launch Remote Dashboard" : "Launch Dashboard") {
-                        viewModel.launchDashboard()
-                    }
+                    Button("Launch Dashboard") { viewModel.launchDashboard() }
                         .buttonStyle(ScarfPrimaryButton())
                         .disabled(viewModel.dashboardStatus.busy)
                 }
