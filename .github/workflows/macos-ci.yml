@@ -1,0 +1,91 @@
+name: macOS CI
+
+on:
+  push:
+    branches:
+      - main
+      - feat/hermes-dashboard-remote-access
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-build-and-test:
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Report toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          sw_vers
+
+      - name: Ensure Metal toolchain is available
+        run: |
+          if ! xcrun -f metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+
+      - name: Resolve Xcode package dependencies
+        run: |
+          xcodebuild \
+            -resolvePackageDependencies \
+            -project scarf/scarf.xcodeproj \
+            -scheme scarf
+
+      - name: Test ScarfCore Swift package
+        run: swift test --package-path scarf/Packages/ScarfCore
+
+      - name: Build macOS app
+        run: |
+          xcodebuild \
+            -project scarf/scarf.xcodeproj \
+            -scheme scarf \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/ScarfDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      # Full.xctestplan also includes UI tests that require a seeded Hermes
+      # fixture and user credentials. CI intentionally runs all unit tests
+      # in scarfTests, including the dashboard gate/regression suite, without
+      # invoking the credentialed UI release gate.
+      - name: Run macOS unit tests
+        run: |
+          xcodebuild \
+            -project scarf/scarf.xcodeproj \
+            -scheme scarf \
+            -testPlan Full \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/ScarfDerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/ScarfUnitTests.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -only-testing:scarfTests \
+            test
+
+      - name: Upload XCTest result bundle on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scarf-unit-test-results
+          path: ${{ runner.temp }}/ScarfUnitTests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
