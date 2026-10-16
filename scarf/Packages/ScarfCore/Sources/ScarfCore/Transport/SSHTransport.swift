@@ -207,11 +207,24 @@ public struct SSHTransport: ServerTransport {
     ///   process exit rather than a hang.
     /// - `LogLevel=QUIET` suppresses the login banner so ACP's line-delimited
     ///   JSON stays binary-clean.
-    nonisolated private func sshArgs(extra: [String] = []) -> [String] {
-        var args: [String] = [
-            "-o", "ControlMaster=auto",
-            "-o", "ControlPath=\(controlDir)/%C",
-            "-o", "ControlPersist=600",
+    nonisolated private func sshArgs(
+        extra: [String] = [],
+        disableMultiplexing: Bool = false
+    ) -> [String] {
+        // OpenSSH uses the first value obtained for each setting. Choose the
+        // mode before building the argv rather than appending overrides later.
+        var args: [String] = disableMultiplexing
+            ? [
+                "-o", "ControlMaster=no",
+                "-o", "ControlPath=none",
+                "-o", "ControlPersist=no"
+            ]
+            : [
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPath=\(controlDir)/%C",
+                "-o", "ControlPersist=600"
+            ]
+        args += [
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
             "-o", "ConnectTimeout=10",
@@ -767,6 +780,52 @@ public struct SSHTransport: ServerTransport {
     }
 
     #if !os(iOS)
+    /// Errors raised while constructing a local SSH port-forward process.
+    public enum PortForwardError: Error, Equatable, Sendable {
+        case invalidLocalPort(Int)
+        case invalidRemotePort(Int)
+    }
+
+    /// Construct (but do not start) an SSH process that forwards a TCP port
+    /// from this Mac to the Hermes host's loopback interface.
+    ///
+    /// The listener is deliberately bound to 127.0.0.1, never 0.0.0.0:
+    /// a Dashboard is an authenticated administrative surface and the tunnel
+    /// must not silently turn it into a LAN service. The remote endpoint is
+    /// also fixed to 127.0.0.1; Hermes keeps its own default loopback bind.
+    ///
+    /// The returned process remains in the foreground so its lifetime is
+    /// owned by the caller. Do not add -f: detached SSH processes outlive the
+    /// UI and make tunnel cleanup / port ownership ambiguous.
+    public func makeLoopbackPortForwardProcess(localPort: Int, remotePort: Int) throws -> Process {
+        guard (1...65535).contains(localPort) else {
+            throw PortForwardError.invalidLocalPort(localPort)
+        }
+        guard (1...65535).contains(remotePort) else {
+            throw PortForwardError.invalidRemotePort(remotePort)
+        }
+
+        // The tunnel owns a dedicated SSH connection. Reusing Scarf's
+        // shared ControlMaster would couple the long-running dashboard CLI
+        // channel to this tunnel's lifetime: closing the Health view would
+        // then tear down the remote server session as well. Do not append
+        // overrides after the common options: ssh_config uses the first value.
+        var sshArgv = sshArgs(extra: [
+            "-o", "ExitOnForwardFailure=yes",
+            "-N",
+            "-T",
+            "-L",
+            "127.0.0.1:\(localPort):127.0.0.1:\(remotePort)"
+        ], disableMultiplexing: true)
+        sshArgv.append(hostSpec)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: sshBinary)
+        process.arguments = sshArgv
+        process.environment = Self.sshSubprocessEnvironment()
+        return process
+    }
+
     public func makeProcess(executable: String, args: [String]) -> Process {
         makeProcess(executable: executable, args: args, cwd: nil)
     }

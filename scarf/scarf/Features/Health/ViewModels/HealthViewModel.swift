@@ -6,9 +6,9 @@ import AppKit
 #endif
 import os
 
-/// Observed state of the local `hermes dashboard` web UI (introduced in
-/// Hermes v0.10.x). `port` defaults to 9119 — the CLI's default and the only
-/// value Scarf launches with today.
+/// Observed status of `hermes dashboard`. `port` is the browser-side
+/// loopback port: 9119 for local contexts, or a dynamically selected local
+/// port forwarded to the remote host's dashboard port for SSH contexts.
 struct WebDashboardStatus: Sendable, Equatable {
     var running: Bool
     var port: Int
@@ -179,15 +179,17 @@ final class HealthViewModel {
             || Self.retiredXAIModels.contains(bareModel)
     }
 
-    /// Liveness + control state for `hermes dashboard` (local web UI). The
-    /// section in `HealthView` is hidden for remote contexts — the dashboard
-    /// binds 127.0.0.1 by default and remote probing / tunneling is out of
-    /// scope for v1.
+    /// Liveness + control state for `hermes dashboard`, local or remote.
+    /// SSH contexts bind a local ephemeral port and forward it to the target's
+    /// loopback dashboard listener; the remote UI is never opened to the LAN.
     var dashboardStatus: WebDashboardStatus = .unknown
     /// Our own spawned subprocess, if the user hit "Launch Dashboard" from
     /// Scarf. Nil when the dashboard was started externally (we still detect
     /// it via the probe but can't terminate it cleanly via `Process.terminate`).
     private var dashboardProcess: Process?
+    /// Local SSH port-forward process for a remote dashboard. This is
+    /// separate from `dashboardProcess`, which owns the remote CLI session.
+    private var dashboardTunnelProcess: Process?
     /// Background polling loop; started in `startDashboardMonitoring()` and
     /// cancelled on view disappear.
     private var dashboardProbeTask: Task<Void, Never>?
@@ -1562,27 +1564,54 @@ final class HealthViewModel {
 
     // MARK: - Web Dashboard (`hermes dashboard`)
 
-    /// Called from `HealthView.onAppear`. Starts a background loop that
-    /// probes `http://127.0.0.1:<port>/api/status` every 3s and keeps
-    /// `dashboardStatus.running` in sync with reality — whether we launched
-    /// the dashboard or the user did via terminal. No-op on remote contexts.
+    /// Called from `HealthView.onAppear`. Probes the loopback dashboard
+    /// endpoint every 3s. For remote contexts it first creates an SSH
+    /// loopback-forward; no dashboard listener is exposed to the LAN.
     func startDashboardMonitoring() {
-        guard !context.isRemote else { return }
         dashboardProbeTask?.cancel()
+        // The row is capability-gated. Do not open even a loopback tunnel
+        // until the target has confirmed that its CLI supports this surface.
+        guard capabilities.hasDashboardCommand else { return }
+        if context.isRemote {
+            dashboardProbeTask = Task { [weak self] in
+                guard let self, await self.ensureRemoteDashboardTunnel() else { return }
+                while !Task.isCancelled {
+                    guard let tunnel = self.dashboardTunnelProcess, tunnel.isRunning else {
+                        self.dashboardTunnelProcess = nil
+                        self.dashboardStatus = WebDashboardStatus(
+                            running: false,
+                            port: self.dashboardStatus.port,
+                            busy: self.dashboardStatus.busy
+                        )
+                        self.actionMessage = "SSH dashboard tunnel disconnected"
+                        return
+                    }
+                    let running = await Self.probeDashboard(port: self.dashboardStatus.port)
+                    self.dashboardStatus = WebDashboardStatus(
+                        running: running,
+                        port: self.dashboardStatus.port,
+                        busy: self.dashboardStatus.busy
+                    )
+                    if !running, let process = self.dashboardProcess, !process.isRunning {
+                        self.dashboardProcess = nil
+                    }
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                }
+            }
+            return
+        }
+
         let port = dashboardStatus.port
         dashboardProbeTask = Task { [weak self] in
             while !Task.isCancelled {
                 let running = await Self.probeDashboard(port: port)
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    // Preserve `busy` so the button stays disabled during an
-                    // in-flight start/stop; only toggle the `running` bit.
                     self.dashboardStatus = WebDashboardStatus(
                         running: running,
                         port: self.dashboardStatus.port,
                         busy: self.dashboardStatus.busy
                     )
-                    // Reap our spawned process if it exited externally.
                     if !running, let p = self.dashboardProcess, !p.isRunning {
                         self.dashboardProcess = nil
                     }
@@ -1595,6 +1624,92 @@ final class HealthViewModel {
     func stopDashboardMonitoring() {
         dashboardProbeTask?.cancel()
         dashboardProbeTask = nil
+        if context.isRemote, let tunnel = dashboardTunnelProcess {
+            dashboardTunnelProcess = nil
+            if tunnel.isRunning { tunnel.terminate() }
+        }
+    }
+
+    /// Keep the remote web service bound to its own loopback, and publish it
+    /// locally only through an SSH-managed 127.0.0.1 listener.
+    private func ensureRemoteDashboardTunnel() async -> Bool {
+        if let tunnel = dashboardTunnelProcess {
+            if tunnel.isRunning { return true }
+            dashboardTunnelProcess = nil
+        }
+        guard case .ssh(let config) = context.kind else { return false }
+        guard let localPort = Self.availableLocalPort() else {
+            actionMessage = "Couldn't find a free local port for the SSH dashboard tunnel"
+            return false
+        }
+
+        let priorBusy = dashboardStatus.busy
+        dashboardStatus = WebDashboardStatus(running: dashboardStatus.running, port: localPort, busy: true)
+        let transport = SSHTransport(contextID: context.id, config: config, displayName: context.displayName)
+        let spawned: Result<Process, Error> = await OffPool.run {
+            Result {
+                let process = try transport.makeLoopbackPortForwardProcess(
+                    localPort: localPort,
+                    remotePort: Self.remoteDashboardPort
+                )
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                return process
+            }
+        }
+
+        if Task.isCancelled {
+            if case .success(let process) = spawned, process.isRunning { process.terminate() }
+            dashboardStatus = WebDashboardStatus(running: dashboardStatus.running, port: localPort, busy: priorBusy)
+            return false
+        }
+
+        switch spawned {
+        case .success(let process):
+            // Process.run() only confirms the local ssh executable spawned;
+            // it does not mean authentication finished or the forwarding
+            // socket is listening. Wait for the actual local listener before
+            // probing HTTP, otherwise a live remote dashboard can be mistaken
+            // for a stopped one and a duplicate server gets launched.
+            let listenerReady = await Self.waitForLoopbackListener(
+                port: localPort,
+                process: process,
+                timeout: 10
+            )
+            if Task.isCancelled {
+                if process.isRunning { process.terminate() }
+                dashboardStatus = WebDashboardStatus(
+                    running: dashboardStatus.running,
+                    port: localPort,
+                    busy: priorBusy
+                )
+                return false
+            }
+            guard listenerReady else {
+                if process.isRunning { process.terminate() }
+                dashboardStatus = WebDashboardStatus(running: false, port: localPort, busy: priorBusy)
+                actionMessage = "SSH dashboard tunnel did not open local port \(localPort). Check the SSH connection and local port availability."
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    self?.actionMessage = nil
+                }
+                return false
+            }
+            dashboardTunnelProcess = process
+            dashboardStatus = WebDashboardStatus(
+                running: dashboardStatus.running,
+                port: localPort,
+                busy: priorBusy
+            )
+            return true
+        case .failure(let error):
+            dashboardStatus = WebDashboardStatus(running: false, port: localPort, busy: priorBusy)
+            actionMessage = "SSH dashboard tunnel failed: \(error.localizedDescription)"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.actionMessage = nil
+            }
+            return false
+        }
     }
 
     /// Launch `hermes dashboard --no-open --port 9119` detached. We pass
@@ -1602,7 +1717,10 @@ final class HealthViewModel {
     /// opens the URL after the probe confirms the server is listening, which
     /// avoids the "Safari tab loads faster than uvicorn binds the port" race.
     func launchDashboard() {
-        guard !context.isRemote else { return }
+        if context.isRemote {
+            launchRemoteDashboard()
+            return
+        }
         guard !dashboardStatus.running, !dashboardStatus.busy else { return }
         guard let binary = fileService.hermesBinaryPath() else {
             actionMessage = "hermes binary not found"
@@ -1689,13 +1807,200 @@ final class HealthViewModel {
         }
     }
 
+    /// Remote variant: start the Hermes CLI over SSH while the separate
+    /// loopback-forward carries browser traffic back to this Mac.
+    private func launchRemoteDashboard() {
+        guard !dashboardStatus.running, !dashboardStatus.busy else { return }
+        guard case .ssh(let config) = context.kind else { return }
+
+        dashboardStatus = WebDashboardStatus(
+            running: dashboardStatus.running,
+            port: dashboardStatus.port,
+            busy: true
+        )
+        actionMessage = "Starting remote dashboard…"
+        let transport = SSHTransport(contextID: context.id, config: config, displayName: context.displayName)
+
+        Task { [weak self] in
+            guard let self, await self.ensureRemoteDashboardTunnel() else {
+                guard let self else { return }
+                self.dashboardStatus = WebDashboardStatus(
+                    running: false,
+                    port: self.dashboardStatus.port,
+                    busy: false
+                )
+                return
+            }
+
+            let localPort = self.dashboardStatus.port
+            // A dashboard may have been started in the remote terminal. Use
+            // it rather than launching a competing listener on port 9119.
+            if await Self.probeDashboard(port: localPort) {
+                self.dashboardStatus = WebDashboardStatus(running: true, port: localPort, busy: false)
+                self.actionMessage = nil
+                if let url = URL(string: "http://127.0.0.1:\(localPort)") {
+                    _ = NSWorkspace.shared.open(url)
+                }
+                return
+            }
+
+            // Process construction harvests the SSH agent environment and
+            // touches the control-socket directory. Keep both that work and
+            // fork/exec off MainActor (charter C10).
+            let spawned: Result<Process, Error> = await OffPool.run {
+                Result {
+                    let process = transport.makeProcess(
+                        executable: "hermes",
+                        args: ["dashboard", "--no-open", "--port", String(Self.remoteDashboardPort)]
+                    )
+                    process.standardOutput = FileHandle.nullDevice
+                    process.standardError = FileHandle.nullDevice
+                    try process.run()
+                    return process
+                }
+            }
+            let process: Process
+            switch spawned {
+            case .success(let startedProcess):
+                process = startedProcess
+            case .failure(let spawnError):
+                Self.dashboardLogger.error(
+                    "Failed to spawn remote hermes dashboard: \(spawnError.localizedDescription, privacy: .public)"
+                )
+                self.dashboardProcess = nil
+                self.dashboardStatus = WebDashboardStatus(running: false, port: localPort, busy: false)
+                self.actionMessage = "Failed to start remote dashboard: \(spawnError.localizedDescription)"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    self?.actionMessage = nil
+                }
+                return
+            }
+
+            self.dashboardProcess = process
+            var ready = false
+            for _ in 0..<20 {
+                if await Self.probeDashboard(port: localPort) {
+                    ready = true
+                    break
+                }
+                if !process.isRunning { break }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+            if !ready {
+                ready = await Self.probeDashboard(port: localPort)
+            }
+            if ready {
+                if let url = URL(string: "http://127.0.0.1:\(localPort)") {
+                    _ = NSWorkspace.shared.open(url)
+                }
+                self.actionMessage = nil
+            } else {
+                // Don't leave a failed CLI session attached to this view
+                // model forever. If the server did start late, the monitor's
+                // next probe will still discover it through the tunnel.
+                if process.isRunning { process.terminate() }
+                self.dashboardProcess = nil
+                self.actionMessage = "Remote dashboard did not become ready on port \(Self.remoteDashboardPort)"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    self?.actionMessage = nil
+                }
+            }
+            self.dashboardStatus = WebDashboardStatus(
+                running: ready,
+                port: localPort,
+                busy: false
+            )
+        }
+    }
+
+    /// Stop only the listener on Hermes's documented dashboard port. Avoid
+    /// `hermes dashboard --stop`: upstream defines it as stopping every
+    /// running Hermes web-server process on the host, not just this port.
+    private func stopRemoteDashboard() {
+        guard !dashboardStatus.busy, case .ssh(let config) = context.kind else { return }
+        dashboardStatus = WebDashboardStatus(
+            running: dashboardStatus.running,
+            port: dashboardStatus.port,
+            busy: true
+        )
+        actionMessage = "Stopping remote dashboard…"
+
+        let transport = SSHTransport(contextID: context.id, config: config, displayName: context.displayName)
+        let port = Self.remoteDashboardPort
+        let localPort = dashboardStatus.port
+        let ownedProcess = dashboardProcess
+        let script = """
+        port=\(port)
+        if command -v lsof >/dev/null 2>&1; then
+          pids=$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null)
+        elif command -v fuser >/dev/null 2>&1; then
+          pids=$(fuser -n tcp "$port" 2>/dev/null)
+        else
+          echo "Neither lsof nor fuser is available to identify the dashboard listener" >&2
+          exit 2
+        fi
+        [ -n "$pids" ] || exit 0
+        for pid in $pids; do
+          case "$pid" in ''|*[!0-9]*) continue ;; esac
+          command_line=$(ps -p "$pid" -o args= 2>/dev/null || true)
+          case "$command_line" in
+            *hermes*dashboard*) kill -TERM "$pid" 2>/dev/null || true ;;
+            *)
+              echo "Refusing to stop PID $pid: port $port is not owned by a Hermes dashboard" >&2
+              exit 3
+              ;;
+          esac
+        done
+        """
+
+        Task { [weak self] in
+            var stopError: String?
+            do {
+                let result = try await transport.streamScript(script, timeout: 8)
+                if result.exitCode != 0 {
+                    stopError = "Couldn't signal the remote dashboard listener (exit \(result.exitCode))."
+                }
+            } catch {
+                stopError = "Couldn't reach the remote dashboard: \(error.localizedDescription)"
+            }
+
+            // The server should exit after SIGTERM; closing our attached SSH
+            // CLI is a final cleanup for the session Scarf itself spawned.
+            if let process = ownedProcess, process.isRunning {
+                process.terminate()
+                Thread.detachNewThread {
+                    _ = process.waitUntilExit(timeout: Self.dashboardStopCeiling)
+                }
+            }
+            self?.dashboardProcess = nil
+
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            let running = await Self.probeDashboard(port: localPort)
+            guard let self else { return }
+            self.dashboardStatus = WebDashboardStatus(running: running, port: localPort, busy: false)
+            if running {
+                self.actionMessage = stopError ?? "Remote dashboard is still responding on port \(port)."
+            } else {
+                self.actionMessage = nil
+            }
+            if self.actionMessage != nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    self?.actionMessage = nil
+                }
+            }
+        }
+    }
+
     /// Stop the dashboard. If Scarf spawned it, send SIGTERM directly. If an
     /// external instance is running, find the PID listening on the dashboard
     /// port via `lsof` and signal that one process — never broadcast a
     /// `pkill -f "hermes dashboard"` that could match shell history, log
     /// tails, or any unrelated argv containing the substring.
     func stopDashboard() {
-        guard !context.isRemote else { return }
+        if context.isRemote {
+            stopRemoteDashboard()
+            return
+        }
         dashboardStatus = WebDashboardStatus(
             running: dashboardStatus.running,
             port: dashboardStatus.port,
@@ -1767,6 +2072,7 @@ final class HealthViewModel {
     /// already waits 1.2 s before it reports, so a longer ceiling would only
     /// let the status line lie for longer.
     nonisolated static let dashboardStopCeiling: TimeInterval = 3
+    nonisolated private static let remoteDashboardPort = 9119
 
     /// Resolve the PID currently listening on the dashboard port via
     /// `lsof -tiTCP:<port> -sTCP:LISTEN`. Returns nil when nothing is
@@ -1825,6 +2131,81 @@ final class HealthViewModel {
     func openDashboardInBrowser() {
         guard let url = URL(string: "http://127.0.0.1:\(dashboardStatus.port)") else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    /// Ask the kernel for an available loopback port, then release it for
+    /// OpenSSH to bind. The small bind/start race is handled by checking the
+    /// tunnel process and retrying on the next explicit start.
+    nonisolated private static func availableLocalPort() -> Int? {
+        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return nil }
+        defer { _ = Darwin.close(descriptor) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(0)
+        address.sin_addr = in_addr(s_addr: in_addr_t(0x7f000001).bigEndian)
+
+        let bindResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else { return nil }
+
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.getsockname(descriptor, $0, &length)
+            }
+        }
+        guard nameResult == 0 else { return nil }
+        return Int(UInt16(bigEndian: address.sin_port))
+    }
+
+    /// Wait for OpenSSH to bind its local forwarding socket. This is
+    /// intentionally a TCP check, not an HTTP check: the remote Dashboard may
+    /// not be running yet, but its tunnel listener must be ready before we
+    /// decide whether to launch it. Blocking polls run on OffPool and are
+    /// bounded by the caller's deadline.
+    nonisolated private static func waitForLoopbackListener(
+        port: Int,
+        process: Process,
+        timeout: TimeInterval
+    ) async -> Bool {
+        await OffPool.run {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                guard process.isRunning else { return false }
+                if Self.loopbackPortAcceptsConnections(port) {
+                    // Recheck after connect: a competing process can win the
+                    // tiny port-selection race and cause ssh to exit.
+                    return process.isRunning
+                }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            return false
+        }
+    }
+
+    nonisolated private static func loopbackPortAcceptsConnections(_ port: Int) -> Bool {
+        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { _ = Darwin.close(descriptor) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(port).bigEndian
+        address.sin_addr = in_addr(s_addr: in_addr_t(0x7f000001).bigEndian)
+
+        let result = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result == 0
     }
 
     /// HEAD-shaped GET against `/api/status`. Returns true on any 2xx response.

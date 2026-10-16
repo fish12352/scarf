@@ -3,9 +3,9 @@ import Foundation
 @testable import scarf
 import ScarfCore
 
-/// Release blocker 3 — the Health pane's **Web Dashboard** row was gated on
-/// `!context.isRemote` ALONE, with no capability flag (charter C1), and the
-/// daemon it starts had no ceiling on the way out (C10).
+/// Release blocker 3 — the Health pane's Web Dashboard row must be gated by
+/// Hermes capability (C1), while remote contexts reach the loopback listener
+/// through a dedicated SSH tunnel. Daemon stops remain bounded (C10).
 ///
 /// **The tag walk, re-opened.** `hermes dashboard` does not exist on Scarf's
 /// supported minimum: the string `dashboard` occurs ZERO times in
@@ -51,10 +51,9 @@ struct WebDashboardGateTests {
 
     // MARK: - The view actually consults it
 
-    /// A flag with no consumer gates nothing — `hasDashboardCommand` had zero
-    /// production consumers for five rounds. This pins that the row's `if` in
-    /// `HealthView` names it, brace-free and by repo-relative path.
-    @Test("HealthView gates webDashboardRow on hasDashboardCommand as well as isRemote")
+    /// A flag with no consumer gates nothing. This pins that the row's `if`
+    /// in `HealthView` consults the Hermes capability flag.
+    @Test("HealthView capability-gates the dashboard row and supports remote contexts")
     func viewConsultsTheFlag() throws {
         let source = try Self.source(at: "scarf/scarf/Features/Health/Views/HealthView.swift")
         let lines = source.components(separatedBy: "\n")
@@ -72,7 +71,45 @@ struct WebDashboardGateTests {
             does nothing. Guard window was:
             \(window)
             """)
-        #expect(window.contains("isRemote"), "the pre-existing remote guard must survive: \(window)")
+        #expect(!window.contains("isRemote"),
+                "the row should support remote contexts through the SSH tunnel: \(window)")
+        let viewModel = try Self.source(at: "scarf/scarf/Features/Health/ViewModels/HealthViewModel.swift")
+        #expect(viewModel.contains("makeLoopbackPortForwardProcess"),
+                "remote dashboard access must be carried by the managed SSH tunnel")
+        let monitor = try #require(
+            Self.functionBody(named: "func startDashboardMonitoring()", in: viewModel),
+            "dashboard monitoring is missing"
+        )
+        #expect(monitor.contains("guard capabilities.hasDashboardCommand"),
+                "unsupported Hermes versions must not start even a local SSH tunnel")
+        let tunnelFactory = try #require(
+            Self.functionBody(named: "private func ensureRemoteDashboardTunnel()", in: viewModel),
+            "remote tunnel startup is missing"
+        )
+        #expect(tunnelFactory.contains("waitForLoopbackListener"),
+                "do not launch another dashboard until the SSH forwarding socket is listening")
+        #expect(tunnelFactory.contains("timeout: 10"),
+                "tunnel readiness must remain bounded")
+    }
+
+    @Test("remote stop signals only the dashboard listener, not every Hermes web server")
+    func remoteStopTargetsOnlyDashboardPort() throws {
+        let source = try Self.source(at: "scarf/scarf/Features/Health/ViewModels/HealthViewModel.swift")
+        let body = try #require(
+            Self.functionBody(named: "private func stopRemoteDashboard()", in: source),
+            "the remote stop path was removed"
+        )
+        #expect(body.contains("Self.remoteDashboardPort"))
+        #expect(body.contains("streamScript"))
+        #expect(body.contains("lsof -tiTCP"))
+        #expect(body.contains("fuser -n tcp"))
+        #expect(body.contains("kill -TERM"))
+        #expect(body.contains("ps -p"))
+        #expect(body.contains("*hermes*dashboard*"),
+                "don't signal an unrelated listener merely because it owns port 9119")
+        #expect(body.contains("Refusing to stop PID"))
+        #expect(!body.contains("runHermes([\"dashboard\", \"--stop\"]"),
+                "the implementation must not invoke Hermes's global web-server stop command")
     }
 
     // MARK: - The daemon has a stop ceiling
