@@ -110,6 +110,18 @@ struct AddServerSheet: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            LabeledField("Hermes Web URL") {
+                TextField("Optional — https://hermes.example.com", text: $viewModel.hermesWebURL)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                    .accessibilityLabel("Hermes Web URL")
+            }
+            Text("Optional. When set, Chat opens Hermes's own /chat client, which uses Hermes's WebSocket API and can resume its existing sessions. The address must be directly reachable from this Mac (for example, LAN, Tailscale, or a reverse proxy); Scarf does not create an SSH tunnel. HTTPS is recommended.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 4)
+
             // Advanced override for `hermesBinaryHint`. Hidden behind a
             // disclosure so the common case (PATH-resolvable hermes)
             // stays uncluttered. Surfaces the workaround for shell

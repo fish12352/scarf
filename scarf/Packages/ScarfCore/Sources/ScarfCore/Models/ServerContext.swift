@@ -48,6 +48,11 @@ public struct SSHConfig: Sendable, Hashable, Codable {
     /// the server again with Test Connection.
     public var hermesBinaryHintIsPath: Bool?
 
+    /// Directly reachable Hermes Dashboard base URL for the WebSocket-backed
+    /// web chat. Optional so existing servers.json entries decode unchanged.
+    /// This must be a URL the Mac can reach directly; Scarf does not tunnel it.
+    public var hermesWebURL: String?
+
     public init(
         host: String,
         user: String? = nil,
@@ -56,7 +61,8 @@ public struct SSHConfig: Sendable, Hashable, Codable {
         remoteHome: String? = nil,
         projectsRoot: String? = nil,
         hermesBinaryHint: String? = nil,
-        hermesBinaryHintIsPath: Bool? = nil
+        hermesBinaryHintIsPath: Bool? = nil,
+        hermesWebURL: String? = nil
     ) {
         self.host = host
         self.user = user
@@ -66,6 +72,7 @@ public struct SSHConfig: Sendable, Hashable, Codable {
         self.projectsRoot = projectsRoot
         self.hermesBinaryHint = hermesBinaryHint
         self.hermesBinaryHintIsPath = hermesBinaryHintIsPath
+        self.hermesWebURL = hermesWebURL
     }
 
     /// The hint when it is a user-typed shell fragment that must reach the
@@ -149,6 +156,12 @@ public struct ServerContext: Sendable, Hashable, Identifiable {
     public nonisolated var isRemote: Bool {
         if case .ssh = kind { return true }
         return false
+    }
+
+    /// Optional direct URL for Hermes's own WebSocket-backed chat surface.
+    public nonisolated var hermesWebURL: String? {
+        guard case .ssh(let config) = kind else { return nil }
+        return config.hermesWebURL
     }
 
     /// Default parent directory under which `ProjectTemplateInstaller` lays

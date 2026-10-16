@@ -23,7 +23,20 @@ struct ChatView: View {
     @AppStorage(ChatDensityKeys.showInspector)
     private var showInspector: Bool = true
 
+    @ViewBuilder
     var body: some View {
+        if let webURL = viewModel.context.hermesWebURL,
+           !webURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Use Hermes's own WebSocket-backed /chat client when a direct
+            // web endpoint is configured. This bypasses the ACP adapter, so
+            // it can attach to sessions created by Hermes's TUI or Dashboard.
+            RemoteHermesChatView(configuredBaseURL: webURL)
+        } else {
+            nativeChatBody
+        }
+    }
+
+    private var nativeChatBody: some View {
         // ScarfMon body-evaluation counter — tracks how many times
         // SwiftUI re-evaluates this view per second during streaming.
         // High counts here usually mean state is fanning out further

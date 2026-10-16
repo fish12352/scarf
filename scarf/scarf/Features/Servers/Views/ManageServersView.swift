@@ -11,6 +11,7 @@ struct ManageServersView: View {
     @State private var showAddSheet = false
     @State private var pendingRemoveID: ServerID?
     @State private var diagnosticsContext: ServerContext?
+    @State private var webChatURLContext: ServerContext?
     @State private var importAlert: ImportAlertState?
     @State private var backupContext: ServerContext?
     @State private var restoreContext: ServerContext?
@@ -55,6 +56,12 @@ struct ManageServersView: View {
             set: { diagnosticsContext = $0?.context }
         )) { wrapper in
             RemoteDiagnosticsView(context: wrapper.context)
+        }
+        .sheet(item: Binding(
+            get: { webChatURLContext.map { IdentifiableContext(context: $0) } },
+            set: { webChatURLContext = $0?.context }
+        )) { wrapper in
+            HermesWebChatURLEditor(context: wrapper.context)
         }
         .sheet(item: Binding(
             get: { backupContext.map { IdentifiableContext(context: $0) } },
@@ -410,6 +417,16 @@ struct ManageServersView: View {
                 Label("Restore from Backup…", systemImage: "arrow.up.doc")
             }
             if context.isRemote {
+                Button {
+                    webChatURLContext = context
+                } label: {
+                    Label(
+                        context.hermesWebURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                            ? "Edit Web Chat URL…"
+                            : "Set Web Chat URL…",
+                        systemImage: "network"
+                    )
+                }
                 Divider()
                 Button {
                     diagnosticsContext = context

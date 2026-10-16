@@ -34,6 +34,8 @@ final class AddServerViewModel {
     /// command name, function loaded via a sourced rc, etc.).
     /// gh#105.
     var hermesBinary: String = ""
+    /// Optional direct URL for the Hermes web chat. Blank keeps the native Scarf chat path.
+    var hermesWebURL: String = ""
 
     var isTesting: Bool = false
     /// Outcome of the most recent Test Connection run. `nil` = not yet run.
@@ -62,14 +64,17 @@ final class AddServerViewModel {
             identityFile: nonEmpty(identityFile),
             remoteHome: nonEmpty(remoteHome),
             projectsRoot: nonEmpty(projectsRoot),
-            hermesBinaryHint: nonEmpty(hermesBinary)
+            hermesBinaryHint: nonEmpty(hermesBinary),
+            hermesWebURL: nonEmpty(hermesWebURL)
         )
     }
 
     /// Hostname or alias is the only required field; everything else
     /// defaults to `~/.ssh/config` / ssh-agent.
     var canSave: Bool {
-        !host.trimmingCharacters(in: .whitespaces).isEmpty
+        guard !host.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        let webURL = hermesWebURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return webURL.isEmpty || HermesWebChatURL.chatURL(from: webURL) != nil
     }
 
     var resolvedDisplayName: String {
