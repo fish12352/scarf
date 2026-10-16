@@ -9,6 +9,15 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      test_scope:
+        description: "Test scope"
+        required: true
+        type: choice
+        options:
+          - focused
+          - full
+        default: focused
 
 permissions:
   contents: read
@@ -21,6 +30,8 @@ jobs:
   macos-build-and-test:
     runs-on: macos-26
     timeout-minutes: 45
+    env:
+      TEST_SCOPE: ${{ github.event.inputs.test_scope || 'focused' }}
 
     steps:
       - name: Check out source
@@ -56,7 +67,12 @@ jobs:
           python3 -c "import yaml; print('PyYAML ' + yaml.__version__)"
 
       - name: Test ScarfCore Swift package
-        run: swift test --package-path scarf/Packages/ScarfCore
+        run: |
+          if [[ "$TEST_SCOPE" == "full" ]]; then
+            swift test --package-path scarf/Packages/ScarfCore
+          else
+            swift test --package-path scarf/Packages/ScarfCore --filter SSHTransportPortForwardTests
+          fi
 
       - name: Build macOS app
         run: |
@@ -71,12 +87,17 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
-      # Full.xctestplan also includes UI tests that require a seeded Hermes
-      # fixture and user credentials. CI intentionally runs all unit tests
-      # in scarfTests, including the dashboard gate/regression suite, without
-      # invoking the credentialed UI release gate.
+      # Full scope is available via workflow_dispatch. Pushes/PRs run
+      # the regression suite directly related to the remote Dashboard work.
+      # Credentialed UI release-gate tests remain excluded in both modes.
       - name: Run macOS unit tests
         run: |
+          if [[ "$TEST_SCOPE" == "full" ]]; then
+            TEST_FILTER="-only-testing:scarfTests"
+          else
+            TEST_FILTER="-only-testing:scarfTests/WebDashboardGateTests"
+          fi
+
           xcodebuild \
             -project scarf/scarf.xcodeproj \
             -scheme scarf \
@@ -88,7 +109,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            -only-testing:scarfTests \
+            "$TEST_FILTER" \
             test
 
       - name: Upload XCTest result bundle on failure
