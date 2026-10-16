@@ -5,7 +5,7 @@ Thanks for your interest in contributing to Scarf.
 ## Getting Started
 
 1. Fork and clone the repo
-2. Open `scarf/scarf.xcodeproj` in Xcode 16.0+
+2. Open `scarf/scarf.xcodeproj` in Xcode 26.0+ (Marker 0.9.0 requires Swift tools 6.2)
 3. Build and run (Scarf runs on macOS 15 Sequoia or newer; Hermes must be installed at `~/.hermes/`)
 
 For an unsigned command-line Debug build without an Apple Developer account, run [`./scripts/local-build.sh`](scripts/local-build.sh). See [BUILDING.md](BUILDING.md) for prerequisites.
