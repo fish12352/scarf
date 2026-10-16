@@ -32,6 +32,8 @@ struct HermesWebChatURLTests {
     func rejectsCredentialsAndNonWebSchemes() {
         #expect(HermesWebChatURL.chatURL(from: "https://hermes.example.com/?token=secret") == nil)
         #expect(HermesWebChatURL.chatURL(from: "https://alice:secret@hermes.example.com") == nil)
+        #expect(HermesWebChatURL.chatURL(from: "http://127.0.0.1:53141") == nil)
+        #expect(HermesWebChatURL.chatURL(from: "http://localhost:9119") == nil)
         #expect(HermesWebChatURL.chatURL(from: "ssh://hermes.example.com") == nil)
         #expect(HermesWebChatURL.chatURL(from: "https://") == nil)
     }

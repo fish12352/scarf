@@ -15,6 +15,7 @@ enum HermesWebChatURL {
               scheme == "https" || scheme == "http",
               let host = components.host,
               !host.isEmpty,
+              !Self.isLoopbackHost(host),
               components.user == nil,
               components.password == nil,
               components.query == nil,
@@ -30,6 +31,15 @@ enum HermesWebChatURL {
             components.path = "/" + path + "/chat"
         }
         return components.url
+    }
+
+    private static func isLoopbackHost(_ rawHost: String) -> Bool {
+        let host = rawHost.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return host == "localhost"
+            || host.hasSuffix(".localhost")
+            || host == "::1"
+            || host.hasPrefix("127.")
+            || host == "0.0.0.0"
     }
 }
 

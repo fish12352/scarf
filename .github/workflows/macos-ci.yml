@@ -67,12 +67,9 @@ jobs:
           python3 -c "import yaml; print('PyYAML ' + yaml.__version__)"
 
       - name: Test ScarfCore Swift package
-        run: |
-          if [[ "$TEST_SCOPE" == "full" ]]; then
-            swift test --package-path scarf/Packages/ScarfCore
-          else
-            swift test --package-path scarf/Packages/ScarfCore --filter SSHTransportPortForwardTests
-          fi
+        # The previous focused filter targeted the deleted Dashboard tunnel tests.
+        # Run the real package suite in both modes; the macOS app step stays focused.
+        run: swift test --package-path scarf/Packages/ScarfCore
 
       - name: Build macOS app
         run: |
@@ -88,15 +85,18 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
-      # Full scope is available via workflow_dispatch. Pushes/PRs run
-      # the regression suite directly related to the remote Dashboard work.
+      # Pushes/PRs cover direct Web Chat URL validation plus the pre-existing
+      # local Dashboard regressions. Full scope remains manually selectable.
       # Credentialed UI release-gate tests remain excluded in both modes.
       - name: Run macOS unit tests
         run: |
           if [[ "$TEST_SCOPE" == "full" ]]; then
-            TEST_FILTER="-only-testing:scarfTests"
+            TEST_FILTERS=(-only-testing:scarfTests)
           else
-            TEST_FILTER="-only-testing:scarfTests/WebDashboardGateTests"
+            TEST_FILTERS=(
+              -only-testing:scarfTests/HermesWebChatURLTests
+              -only-testing:scarfTests/WebDashboardGateTests
+            )
           fi
 
           xcodebuild \
@@ -111,7 +111,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            "$TEST_FILTER" \
+            "${TEST_FILTERS[@]}" \
             test
 
       - name: Package macOS app
